@@ -1,10 +1,13 @@
 import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ComponentRef } from 'react';
 import { Platform, Pressable, StyleSheet, View } from 'react-native';
 
+import { LiveRig } from '@/components/live-rig';
 import { ThemedText } from '@/components/themed-text';
 import { INK, WirePill } from '@/components/wire';
 import { Spacing } from '@/constants/theme';
+import { useLivePose } from '@/rig/live-pose';
+import { PoseBridge } from '@/rig/pose-bridge';
 import { TRACK_MAX_SECONDS } from '@/rig/types';
 import { formatTime } from '@/video/timing';
 
@@ -12,14 +15,21 @@ import { formatTime } from '@/video/timing';
 const CAN_RECORD = Platform.OS !== 'web';
 const RECORD = '#FF3B30';
 
-// The Character stage: a front camera you record yourself on. The finished clip is handed
-// to Animate, which tracks your body and wraps your artwork around it.
+// The Character stage: a front camera you record yourself on. Once there's artwork, it's
+// rigged onto your body live, before you record; the finished clip goes on to Animate.
 export function RecordStage({
   active,
   ready,
+  art,
+  fullBleed,
   onRecorded,
   onStatus,
 }: {
+  // The artwork to wear live (the first Character artwork), if any.
+  art?: string;
+  // Fill the whole screen behind the page; top/bottom mark the open camera area between the
+  // title and the controls, where the hint and record button go.
+  fullBleed?: { top: number; bottom: number };
   // The stage is on screen; the camera only runs then.
   active: boolean;
   // There's artwork to wear, so recording makes sense.
@@ -33,6 +43,14 @@ export function RecordStage({
   const [cameraReady, setCameraReady] = useState(false);
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  const stageRef = useRef<ComponentRef<typeof View>>(null);
+  const [stage, setStage] = useState({ width: 0, height: 0 });
+  // On iPhone the live rig needs snapshots, which the camera only takes in photo mode, so it
+  // switches to video just for recording. The browser reads the video stream directly.
+  const [cameraMode, setCameraMode] = useState<'picture' | 'video'>(
+    CAN_RECORD ? 'picture' : 'video',
+  );
+  const readyWaiter = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!recording) return;
@@ -64,27 +82,47 @@ export function RecordStage({
     setElapsed(0);
     setRecording(true);
     try {
+      if (cameraMode !== 'video') {
+        // Wait for the camera to come back up in video mode before recording.
+        const switched = new Promise<void>((resolve) => (readyWaiter.current = resolve));
+        setCameraReady(false);
+        setCameraMode('video');
+        await switched;
+      }
       const video = await camera.current?.recordAsync({ maxDuration: TRACK_MAX_SECONDS });
       if (video) onRecorded(video.uri);
     } catch {
       onStatus('That clip did not record. Try again.');
     } finally {
       setRecording(false);
+      if (CAN_RECORD) setCameraMode('picture');
     }
   }
 
   const granted = cameraPermission?.granted;
+  const liveActive =
+    active && !!art && !!granted && !recording && (!CAN_RECORD || cameraMode === 'picture');
+  const live = useLivePose({ container: stageRef, camera, active: liveActive });
 
   return (
-    <View style={styles.stage}>
+    <View
+      ref={stageRef}
+      style={fullBleed ? styles.fullBleed : styles.stage}
+      onLayout={({ nativeEvent: { layout } }) =>
+        setStage({ width: layout.width, height: layout.height })
+      }>
       {granted ? (
         <CameraView
           ref={camera}
           style={StyleSheet.absoluteFill}
           facing="front"
-          mode="video"
+          mode={cameraMode}
           active={active || recording}
-          onCameraReady={() => setCameraReady(true)}
+          onCameraReady={() => {
+            setCameraReady(true);
+            readyWaiter.current?.();
+            readyWaiter.current = null;
+          }}
         />
       ) : (
         <View style={styles.center}>
@@ -94,13 +132,22 @@ export function RecordStage({
         </View>
       )}
 
-      <View style={styles.top} pointerEvents="none">
+      {art && live && <LiveRig art={art} live={live} stage={stage} mirrored />}
+      {art && active && CAN_RECORD && <PoseBridge />}
+
+      <View
+        style={[styles.top, fullBleed && { top: fullBleed.top + Spacing.two }]}
+        pointerEvents="none">
         <ThemedText type="caption" style={styles.hint}>
           {recording
             ? `Recording ${formatTime(elapsed).slice(3)} of 0:${TRACK_MAX_SECONDS}`
-            : !CAN_RECORD
-              ? 'Recording works in the iPhone app. Upload a video below instead.'
-              : 'Record yourself moving, head to toe. Your artwork will wrap around you.'}
+            : !art
+              ? 'Add artwork below and it will wrap around you live.'
+              : !live
+                ? 'Step back so your whole body is in view.'
+                : CAN_RECORD
+                  ? 'Your artwork follows you. Record when you’re ready.'
+                  : 'Your artwork follows you. Recording works in the iPhone app.'}
         </ThemedText>
       </View>
 
@@ -112,6 +159,7 @@ export function RecordStage({
           accessibilityLabel={recording ? 'Stop recording' : 'Record yourself'}
           style={({ pressed }) => [
             styles.shutter,
+            fullBleed && { bottom: fullBleed.bottom + Spacing.three },
             !cameraReady && styles.disabled,
             pressed && styles.pressed,
           ]}>
@@ -129,6 +177,10 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     overflow: 'hidden',
     backgroundColor: '#111111',
+  },
+  fullBleed: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#000000',
   },
   center: {
     ...StyleSheet.absoluteFill,

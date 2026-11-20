@@ -32,6 +32,11 @@ const ICONS = {
   up: ['chevron.up', 'expand_less'],
   down: ['chevron.down', 'expand_more'],
   note: ['text.bubble', 'chat_bubble_outline'],
+  trim: ['scissors', 'content_cut'],
+  speed: ['speedometer', 'speed'],
+  look: ['camera.filters', 'filter_vintage'],
+  crop: ['crop', 'crop'],
+  transition: ['rectangle.on.rectangle', 'animation'],
 } as const;
 
 export type IconName = keyof typeof ICONS;

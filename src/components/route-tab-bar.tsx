@@ -19,9 +19,9 @@ const TABS: { route: string; name: string; icon: IconName }[] = [
 const PARENT_TAB: Record<string, string> = { animate: 'create' };
 
 const ITEM_W = 72;
-const ITEM_H = 52;
-const PAD = 10;
-const SPOT = 44;
+const ITEM_H = 38;
+const PAD = 4;
+const SPOT = 32;
 const SPRING = { damping: 18, stiffness: 200, mass: 0.8 };
 const GLASS = isLiquidGlassAvailable();
 const ICON = '#FFFFFF';
@@ -93,7 +93,7 @@ export function RouteTabBar({ state, navigateToTab, insets }: BottomTabBarProps)
                   accessibilityState={{ selected }}
                   style={({ pressed }) => [styles.item, pressed && styles.pressed]}>
                   <View style={!selected && styles.resting}>
-                    <Icon name={tab.icon} size={24} color={ICON} weight="light" />
+                    <Icon name={tab.icon} size={21} color={ICON} weight="light" />
                   </View>
                 </Pressable>
               );
@@ -125,7 +125,7 @@ const styles = StyleSheet.create({
   },
   fallback: {
     backgroundColor: 'rgba(255, 255, 255, 0.07)',
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255, 255, 255, 0.55)',
     boxShadow: '0px 10px 30px rgba(0, 0, 0, 0.25)',
     // Blurs what's behind the bar in the browser; ignored on iPhone, where liquid glass

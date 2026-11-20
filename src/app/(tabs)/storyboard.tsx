@@ -1,4 +1,3 @@
-import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { StatusBar } from 'expo-status-bar';
 import { useIsFocused } from 'expo-router';
@@ -27,9 +26,17 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { scheduleOnRN } from 'react-native-worklets';
 
 import { Icon, type IconName } from '@/components/icon';
+import { EditedImage, SceneEditor, onScreen } from '@/components/scene-editor';
 import { ThemedText } from '@/components/themed-text';
 import { FontFamily, Gutter, MaxContentWidth, Spacing, TabBarSpace } from '@/constants/theme';
-import { makeId, useStudio, type Panel, type Shot, type Take } from '@/state/studio';
+import {
+  makeId,
+  useStudio,
+  type Panel,
+  type PanelEdit,
+  type Shot,
+  type Take,
+} from '@/state/studio';
 import { extractFrames } from '@/video/frames';
 import { formatTime } from '@/video/timing';
 
@@ -168,7 +175,7 @@ function Still({
             accessibilityRole="button"
             accessibilityLabel={`Panel ${number}${panel.note ? `, ${panel.note}` : ''}`}
             style={StyleSheet.absoluteFill}>
-            <Image source={panel.source} style={StyleSheet.absoluteFill} contentFit="cover" />
+            <EditedImage source={panel.source} edit={panel.edit} />
             <ThemedText style={styles.badge}>{number}</ThemedText>
             <ThemedText style={styles.takesBadge}>{takeCount(panel.takes.length)}</ThemedText>
           </Pressable>
@@ -331,6 +338,10 @@ export default function StoryboardScreen() {
         p.id === target.id ? { ...p, source: take.source, time: take.time } : p,
       ),
     );
+  }
+
+  function editScene(id: string, edit: PanelEdit) {
+    setPanels((existing) => existing.map((p) => (p.id === id ? { ...p, edit } : p)));
   }
 
   function editNote(id: string, note: string) {
@@ -532,11 +543,7 @@ export default function StoryboardScreen() {
                         styles.takeCard,
                         { width: takeWidth, opacity: i === takeView ? 1 : 0.55 },
                       ]}>
-                      <Image
-                        source={take.source}
-                        style={StyleSheet.absoluteFill}
-                        contentFit="cover"
-                      />
+                      <EditedImage source={take.source} edit={opened.edit} />
                       <ThemedText style={styles.takeLabel}>Take {i + 1}</ThemedText>
                       {isMain && (
                         <View style={styles.takeMain}>
@@ -591,7 +598,12 @@ export default function StoryboardScreen() {
             </View>
 
             <View style={[styles.page, styles.detailBody]}>
-              <ThemedText style={styles.mono}>{timecode(opened)}</ThemedText>
+              <View style={styles.slateRow}>
+                <ThemedText style={styles.mono}>{timecode(opened)}</ThemedText>
+                <ThemedText style={styles.mono}>
+                  ON SCREEN {onScreen(opened.edit).toFixed(1)}s
+                </ThemedText>
+              </View>
               <TextInput
                 value={opened.note}
                 onChangeText={(note) => editNote(opened.id, note)}
@@ -623,6 +635,7 @@ export default function StoryboardScreen() {
                   onPress={() => remove(opened)}
                 />
               </View>
+              <SceneEditor edit={opened.edit} onChange={(edit) => editScene(opened.id, edit)} />
             </View>
           </View>
         )}
@@ -910,7 +923,7 @@ const styles = StyleSheet.create({
     gap: Spacing.three,
   },
   narration: {
-    minHeight: 72,
+    minHeight: 56,
     maxHeight: 140,
     padding: Spacing.three - 4,
     borderRadius: 12,
