@@ -5,9 +5,10 @@ import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 
 // Wireframe look: flat paper, ink outlines, no glass or shadows.
-export const PAPER = '#EDEDED';
-export const INK = '#1C1C1E';
-export const BOX = '#FFFFFF';
+// Dark wireframe, on the same black as Camera and Storyboard.
+export const PAPER = '#000000';
+export const INK = '#FFFFFF';
+export const BOX = '#1C1C1E';
 export const ADDED = '#248A3D';
 export const LINE = 1.5;
 
@@ -83,8 +84,9 @@ const wire = StyleSheet.create({
     paddingHorizontal: Spacing.three - 2,
     borderRadius: 18,
     backgroundColor: BOX,
-    borderWidth: LINE,
-    borderColor: INK,
+    // Hairline to match the section switch above it.
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 255, 255, 0.5)',
   },
   pillSelected: {
     backgroundColor: INK,

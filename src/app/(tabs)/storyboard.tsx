@@ -2,7 +2,7 @@ import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { StatusBar } from 'expo-status-bar';
 import { useIsFocused } from 'expo-router';
-import { useState } from 'react';
+import { useRef, useState, type ComponentRef } from 'react';
 import {
   Modal,
   Platform,
@@ -29,28 +29,68 @@ import { scheduleOnRN } from 'react-native-worklets';
 import { Icon, type IconName } from '@/components/icon';
 import { ThemedText } from '@/components/themed-text';
 import { FontFamily, Gutter, MaxContentWidth, Spacing, TabBarSpace } from '@/constants/theme';
-import { makeId, useStudio, type Panel, type Shot } from '@/state/studio';
+import { makeId, useStudio, type Panel, type Shot, type Take } from '@/state/studio';
 import { extractFrames } from '@/video/frames';
 import { formatTime } from '@/video/timing';
 
-// A screening-room reel: stills on black, the one in front flat, the rest turned away in depth.
-const FILM = '#000000';
-const SURFACE = '#1C1C1E';
-const LINE = 'rgba(255, 255, 255, 0.14)';
-const MUTED = '#A1A1A6';
-const CUE = '#FF9F0A';
+// A screening-room drum: 16:9 stills on black stacked vertically, three in view. The one in
+// the middle faces you flat; the ones above and below tip back around the drum.
+// A single greyscale ramp, light to dark, for everything on this screen.
+const GREY = {
+  50: '#F5F5F5', // primary text, primary buttons
+  200: '#D4D4D4', // highlights: panel cue, main take
+  400: '#9E9E9E', // secondary text
+  600: '#5C5C5C', // dots, outlines
+  800: '#262626', // surfaces: sheets, chips, empty cards
+  950: '#000000', // background
+} as const;
+const FILM = GREY[950];
+const SURFACE = GREY[800];
+const MUTED = GREY[400];
+const CUE = GREY[200];
 const MONO = Platform.select({ ios: 'Menlo', default: 'ui-monospace, Menlo, monospace' });
 
-const STEP = 172;
-const CARD_W = 244;
-const CARD_H = 152;
-const REEL_H = CARD_H + 48;
+const IN_VIEW = 3;
+// Empty slots the reel shows before anything is uploaded, so its shape is always visible.
+const PLACEHOLDERS = 5;
+// The middle card aims to be 30% of the screen's height, as wide as the page allows.
+const SCREEN_SHARE = 0.3;
+// The tilted neighbours look about half as tall as the middle card, so slots are a bit
+// shorter than a card, plus a small gap.
+const SLOT = 0.78;
+const GAP = 12;
+// The take carousel shows the chosen take with its neighbours peeking in at the sides.
+const TAKE_SHARE = 0.78;
+const TAKE_GAP = 12;
 
-function pad(n: number) {
-  return String(n).padStart(2, '0');
+function newPanel(source: Take['source'], time: number | null): Panel {
+  return { id: makeId(), source, time, note: '', takes: [{ id: makeId(), source, time }] };
 }
 
-function timecode(panel: Panel) {
+// Empty slots step from light (1) to dark (5), each with ink that stays readable on it.
+const SLOT_SHADES = ['#E5E5E5', '#B3B3B3', '#808080', '#4D4D4D', '#262626'] as const;
+function slotInk(number: number) {
+  return (number - 1) % SLOT_SHADES.length < 3 ? '#111111' : GREY[50];
+}
+
+// The reel's slots: every card in order, plus a copy of the last card above card 1 and of
+// the first card after the last, so the ends of the reel show each other like a loop.
+function reelSlots(count: number) {
+  return [
+    { index: -1, real: count - 1 },
+    ...Array.from({ length: count }, (_, i) => ({ index: i, real: i })),
+    { index: count, real: 0 },
+  ];
+}
+
+// Something the user is adding while panels already exist: they choose take or new panels.
+type Pending = { kind: 'photo' | 'video'; uri: string; shotId?: string };
+
+function takeCount(n: number) {
+  return `${n} ${n === 1 ? 'take' : 'takes'}`;
+}
+
+function timecode(panel: { time: number | null }) {
   return panel.time === null ? 'PHOTO' : formatTime(panel.time).slice(3);
 }
 
@@ -79,47 +119,76 @@ function DarkButton({
         disabled && styles.disabled,
         pressed && styles.pressed,
       ]}>
-      <Icon name={icon} size={18} color={tone === 'danger' ? '#FF453A' : '#FFFFFF'} />
+      <Icon name={icon} size={18} color={tone === 'danger' ? GREY[200] : GREY[50]} />
     </Pressable>
   );
 }
 
-// One still on the reel. Its tilt, size and stacking come from how far it sits from centre.
+// One still on the reel (or an empty slot when there's no panel yet). Its tilt, size and
+// stacking come from how far it sits from centre.
 function Still({
   panel,
   index,
-  scrollX,
+  number = index + 1,
+  scrollY,
+  step,
+  cardWidth,
   onPress,
 }: {
-  panel: Panel;
+  panel?: Panel;
   index: number;
-  scrollX: SharedValue<number>;
+  // The panel number shown on the card; differs from index for the wrap-around copies.
+  number?: number;
+  scrollY: SharedValue<number>;
+  step: number;
+  cardWidth: number;
   onPress: () => void;
 }) {
   const style = useAnimatedStyle(() => {
-    const offset = (scrollX.value - index * STEP) / STEP;
+    // Negative above the middle, positive below.
+    const offset = (index * step - scrollY.value) / step;
     const distance = Math.abs(offset);
     return {
       zIndex: Math.round(100 - distance * 10),
-      opacity: interpolate(distance, [0, 3], [1, 0.35], Extrapolation.CLAMP),
+      opacity: interpolate(distance, [0, 1, 2], [1, 0.7, 0.2], Extrapolation.CLAMP),
       transform: [
-        { perspective: 900 },
-        { rotateY: `${interpolate(offset, [-1, 0, 1], [48, 0, -48], Extrapolation.CLAMP)}deg` },
-        { scale: interpolate(distance, [0, 1], [1, 0.82], Extrapolation.CLAMP) },
+        { perspective: 800 },
+        { rotateX: `${interpolate(offset, [-1, 0, 1], [52, 0, -52], Extrapolation.CLAMP)}deg` },
+        { scale: interpolate(distance, [0, 1], [1, 0.86], Extrapolation.CLAMP) },
       ],
     };
   });
 
   return (
-    <View style={styles.slot}>
-      <Animated.View style={[styles.still, style]}>
-        <Pressable
-          onPress={onPress}
-          accessibilityRole="button"
-          accessibilityLabel={`Panel ${index + 1}${panel.note ? `, ${panel.note}` : ''}`}
-          style={StyleSheet.absoluteFill}>
-          <Image source={panel.source} style={StyleSheet.absoluteFill} contentFit="cover" />
-        </Pressable>
+    <View style={[styles.slot, { height: step }]}>
+      <Animated.View style={[styles.still, { width: cardWidth }, style]}>
+        {panel ? (
+          <Pressable
+            onPress={onPress}
+            accessibilityRole="button"
+            accessibilityLabel={`Panel ${number}${panel.note ? `, ${panel.note}` : ''}`}
+            style={StyleSheet.absoluteFill}>
+            <Image source={panel.source} style={StyleSheet.absoluteFill} contentFit="cover" />
+            <ThemedText style={styles.badge}>{number}</ThemedText>
+            <ThemedText style={styles.takesBadge}>{takeCount(panel.takes.length)}</ThemedText>
+          </Pressable>
+        ) : (
+          <Pressable
+            onPress={onPress}
+            accessibilityRole="button"
+            accessibilityLabel={`Empty panel ${number}, upload a video`}
+            style={[
+              StyleSheet.absoluteFill,
+              styles.slotEmpty,
+              { backgroundColor: SLOT_SHADES[(number - 1) % SLOT_SHADES.length] },
+            ]}>
+            <Icon name="upload" size={22} color={slotInk(number)} />
+            <ThemedText type="caption" style={{ color: slotInk(number) }}>
+              Upload a video
+            </ThemedText>
+            <ThemedText style={styles.badge}>{number}</ThemedText>
+          </Pressable>
+        )}
       </Animated.View>
     </View>
   );
@@ -127,47 +196,73 @@ function Still({
 
 export default function StoryboardScreen() {
   const insets = useSafeAreaInsets();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const isFocused = useIsFocused();
   const { shots, setShots, panels, setPanels } = useStudio();
   const reel = useAnimatedRef<Animated.ScrollView>();
-  const scrollX = useSharedValue(0);
+  const scrollY = useSharedValue(0);
+  const [reelHeight, setReelHeight] = useState(0);
   const [current, setCurrent] = useState(0);
   const [detail, setDetail] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
+  const [pending, setPending] = useState<Pending | null>(null);
+  const [takeView, setTakeView] = useState(0);
+  // Opened from "Add narration": the narration box takes focus straight away.
+  const [narrating, setNarrating] = useState(false);
 
   const pageWidth = Math.min(width, MaxContentWidth);
+  // Until the reel reports its size, estimate it from the screen so it never renders blank.
+  const area = reelHeight || Math.max(height - insets.top - insets.bottom - TabBarSpace - 200, 240);
+  const cardWidth = Math.min(pageWidth - Gutter * 2, (height * SCREEN_SHARE * 16) / 9);
+  const step = ((cardWidth * 9) / 16) * SLOT + GAP;
+  // Three slots tall, centred in the space below the slate.
+  const reelSpace = Math.min(area, step * IN_VIEW);
+  const takeWidth = Math.round(pageWidth * TAKE_SHARE);
+  const takesRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const lastIndex = panels.length - 1;
   const panel = panels[Math.min(current, lastIndex)];
   const open = panels.findIndex((p) => p.id === detail);
 
   const onScroll = useAnimatedScrollHandler((event) => {
-    scrollX.value = event.contentOffset.x;
+    scrollY.value = event.contentOffset.y;
   });
   useAnimatedReaction(
-    () => Math.round(scrollX.value / STEP),
+    () => Math.round(scrollY.value / step),
     (index, previous) => {
       if (index !== previous) scheduleOnRN(setCurrent, Math.max(0, index));
     },
   );
 
   function show(index: number) {
-    reel.current?.scrollTo({ x: index * STEP, animated: true });
+    reel.current?.scrollTo({ y: index * step, animated: true });
     setCurrent(index);
   }
 
-  async function addVideo(uri: string) {
+  // Adds a video's stills either as new panels or as another take of the existing panels,
+  // matched in order (the first still becomes a take of panel 1, and so on).
+  async function addVideo(uri: string, asTake: boolean) {
     setBusy(true);
     setStatus('Reading frames…');
     try {
       const frames = await extractFrames(uri);
-      const first = panels.length;
-      setPanels((existing) => [
-        ...existing,
-        ...frames.map((f) => ({ id: makeId(), source: f.source, time: f.time, note: '' })),
-      ]);
-      setStatus(`${frames.length} stills added.`);
+      const first = asTake ? 0 : panels.length;
+      setPanels((existing) => {
+        if (!asTake) return [...existing, ...frames.map((f) => newPanel(f.source, f.time))];
+        const merged = existing.map((panel, i) =>
+          frames[i]
+            ? {
+                ...panel,
+                takes: [
+                  ...panel.takes,
+                  { id: makeId(), source: frames[i].source, time: frames[i].time },
+                ],
+              }
+            : panel,
+        );
+        return [...merged, ...frames.slice(existing.length).map((f) => newPanel(f.source, f.time))];
+      });
+      setStatus('');
       requestAnimationFrame(() => show(first));
       return true;
     } catch {
@@ -178,24 +273,64 @@ export default function StoryboardScreen() {
     }
   }
 
+  function addPhoto(uri: string, asTake: boolean) {
+    if (asTake && panel) {
+      const target = panel.id;
+      setPanels((existing) =>
+        existing.map((p) =>
+          p.id === target
+            ? { ...p, takes: [...p.takes, { id: makeId(), source: { uri }, time: null }] }
+            : p,
+        ),
+      );
+      return;
+    }
+    const first = panels.length;
+    setPanels((existing) => [...existing, newPanel({ uri }, null)]);
+    requestAnimationFrame(() => show(first));
+  }
+
+  // With nothing on the board yet there's nothing to be a take of, so skip the question.
+  async function add(next: Pending, asTake: boolean) {
+    setPending(null);
+    const added =
+      next.kind === 'photo' ? (addPhoto(next.uri, asTake), true) : await addVideo(next.uri, asTake);
+    if (added && next.shotId) setShots((existing) => existing.filter((s) => s.id !== next.shotId));
+  }
+
+  function offer(next: Pending) {
+    setStatus('');
+    if (panels.length) setPending(next);
+    else add(next, false);
+  }
+
   async function upload() {
     setStatus('');
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['videos'] });
-    if (!result.canceled) await addVideo(result.assets[0].uri);
+    if (!result.canceled) offer({ kind: 'video', uri: result.assets[0].uri });
   }
 
-  async function addShot(shot: Shot) {
-    if (shot.kind === 'photo') {
-      const first = panels.length;
-      setPanels((existing) => [
-        ...existing,
-        { id: makeId(), source: { uri: shot.uri }, time: null, note: '' },
-      ]);
-      requestAnimationFrame(() => show(first));
-    } else if (!(await addVideo(shot.uri))) {
-      return;
-    }
-    setShots((existing) => existing.filter((s) => s.id !== shot.id));
+  function addShot(shot: Shot) {
+    offer({ kind: shot.kind, uri: shot.uri, shotId: shot.id });
+  }
+
+  function openPanel(target: Panel, narrate = false) {
+    setTakeView(
+      Math.max(
+        0,
+        target.takes.findIndex((t) => t.source === target.source),
+      ),
+    );
+    setNarrating(narrate);
+    setDetail(target.id);
+  }
+
+  function chooseMain(target: Panel, take: Take) {
+    setPanels((existing) =>
+      existing.map((p) =>
+        p.id === target.id ? { ...p, source: take.source, time: take.time } : p,
+      ),
+    );
   }
 
   function editNote(id: string, note: string) {
@@ -225,31 +360,36 @@ export default function StoryboardScreen() {
   return (
     <View style={styles.root}>
       {isFocused && <StatusBar style="light" />}
-      <ScrollView
-        contentContainerStyle={{
-          paddingTop: insets.top + Spacing.two,
-          paddingBottom: TabBarSpace + insets.bottom,
-        }}
-        keyboardShouldPersistTaps="handled">
+      <View
+        style={[
+          styles.flex,
+          { paddingTop: insets.top + Spacing.two, paddingBottom: TabBarSpace + insets.bottom },
+        ]}>
         <View style={[styles.page, styles.header]}>
           <ThemedText type="title" accessibilityRole="header" style={styles.white}>
-            Storyboard
+            Storyboards
           </ThemedText>
           <DarkButton icon="upload" label="Upload video" onPress={upload} disabled={busy} />
         </View>
 
         {panel ? (
           <View style={[styles.page, styles.slate]}>
-            <ThemedText style={styles.cue}>
-              PANEL {pad(current + 1)} / {pad(panels.length)}
-            </ThemedText>
-            <ThemedText
-              type="headline"
-              numberOfLines={1}
-              style={panel.note ? styles.white : styles.muted}>
-              {panel.note || 'No narration yet'}
-            </ThemedText>
-            <ThemedText style={styles.mono}>{timecode(panel)}</ThemedText>
+            <View style={styles.slateRow}>
+              <ThemedText style={styles.cue}>
+                PANEL {current + 1} / {panels.length} ·{' '}
+                {takeCount(panel.takes.length).toUpperCase()}
+              </ThemedText>
+              <ThemedText style={styles.mono}>{timecode(panel)}</ThemedText>
+            </View>
+            <Pressable
+              onPress={() => openPanel(panel, true)}
+              accessibilityRole="button"
+              accessibilityLabel={panel.note ? `Narration: ${panel.note}. Edit` : 'Add narration'}
+              hitSlop={8}>
+              <ThemedText numberOfLines={1} style={[styles.cue, !panel.note && styles.muted]}>
+                {panel.note || '+ Add narration'}
+              </ThemedText>
+            </Pressable>
           </View>
         ) : null}
 
@@ -262,46 +402,47 @@ export default function StoryboardScreen() {
           </ThemedText>
         ) : null}
 
-        {panels.length ? (
+        <View
+          style={styles.reelArea}
+          onLayout={(event) => setReelHeight(event.nativeEvent.layout.height)}>
           <Animated.ScrollView
             ref={reel}
-            horizontal
             onScroll={onScroll}
             scrollEventThrottle={16}
-            snapToInterval={STEP}
+            snapToInterval={step}
             decelerationRate="fast"
-            showsHorizontalScrollIndicator={false}
-            style={styles.reel}
-            contentContainerStyle={{ paddingHorizontal: (width - STEP) / 2 }}>
-            {panels.map((p, i) => (
-              <Still
-                key={p.id}
-                panel={p}
-                index={i}
-                scrollX={scrollX}
-                onPress={() => (i === current ? setDetail(p.id) : show(i))}
-              />
-            ))}
+            showsVerticalScrollIndicator={false}
+            style={[styles.reel, { top: (area - reelSpace) / 2, height: reelSpace }]}
+            // One slot of the padding is taken by the wrap-around copy above card 1.
+            contentContainerStyle={{ paddingVertical: Math.max(0, (reelSpace - step) / 2 - step) }}>
+            {reelSlots(panels.length || PLACEHOLDERS).map(({ index, real }) => {
+              const p = panels[real];
+              const copy = index !== real;
+              return (
+                <Still
+                  key={copy ? `copy-${index}` : (p?.id ?? `empty-${real}`)}
+                  panel={p}
+                  index={index}
+                  number={real + 1}
+                  scrollY={scrollY}
+                  step={step}
+                  cardWidth={cardWidth}
+                  onPress={() => {
+                    // Tapping any scene opens it; empty slots only upload from the middle.
+                    if (p) {
+                      show(real);
+                      openPanel(p);
+                    } else if (real === current && !copy) {
+                      if (!busy) upload();
+                    } else {
+                      show(real);
+                    }
+                  }}
+                />
+              );
+            })}
           </Animated.ScrollView>
-        ) : (
-          <View style={[styles.page, styles.empty]}>
-            <Icon name="board" size={36} color={MUTED} />
-            <ThemedText style={[styles.muted, styles.center]}>
-              Upload a video, or add a clip from the camera, and it becomes a reel of stills you can
-              narrate.
-            </ThemedText>
-            <Pressable
-              onPress={upload}
-              disabled={busy}
-              accessibilityRole="button"
-              style={({ pressed }) => [styles.primary, pressed && styles.pressed]}>
-              <Icon name="upload" size={16} color={FILM} />
-              <ThemedText type="label" style={{ color: FILM }}>
-                Upload video
-              </ThemedText>
-            </Pressable>
-          </View>
-        )}
+        </View>
 
         {shots.length > 0 && (
           <ScrollView
@@ -326,36 +467,7 @@ export default function StoryboardScreen() {
             ))}
           </ScrollView>
         )}
-
-        {panels.length > 0 && (
-          <View style={[styles.page, styles.sheet]} accessibilityRole="list">
-            {panels.map((p, i) => {
-              const selected = i === current;
-              return (
-                <Pressable
-                  key={p.id}
-                  onPress={() => (selected ? setDetail(p.id) : show(i))}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Panel ${i + 1}, ${timecode(p)}${p.note ? `, ${p.note}` : ''}`}
-                  accessibilityState={{ selected }}
-                  style={[
-                    styles.cell,
-                    { width: (pageWidth - Gutter * 2 - 8 * 2) / 3 },
-                    selected && styles.cellSelected,
-                  ]}>
-                  <ThemedText style={[styles.cellNumber, selected && { color: CUE }]}>
-                    {pad(i + 1)}
-                  </ThemedText>
-                  <ThemedText numberOfLines={1} style={styles.cellNote}>
-                    {p.note || 'Untitled'}
-                  </ThemedText>
-                  <ThemedText style={styles.cellTime}>{timecode(p)}</ThemedText>
-                </Pressable>
-              );
-            })}
-          </View>
-        )}
-      </ScrollView>
+      </View>
 
       <Modal
         visible={!!opened}
@@ -371,15 +483,111 @@ export default function StoryboardScreen() {
             <View style={[styles.page, styles.header]}>
               <DarkButton icon="close" label="Close" onPress={() => setDetail(null)} />
               <ThemedText style={styles.cue}>
-                PANEL {pad(open + 1)} / {pad(panels.length)}
+                PANEL {open + 1} / {panels.length}
               </ThemedText>
               <View style={styles.roundSpacer} />
             </View>
 
             <View style={styles.letterbox}>
-              <View style={[styles.frame, { height: pageWidth / 1.78 }]}>
-                <Image source={opened.source} style={StyleSheet.absoluteFill} contentFit="cover" />
-              </View>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                snapToInterval={takeWidth + TAKE_GAP}
+                decelerationRate="fast"
+                scrollEventThrottle={16}
+                contentOffset={{ x: takeView * (takeWidth + TAKE_GAP), y: 0 }}
+                onScroll={({ nativeEvent }) =>
+                  setTakeView(
+                    Math.max(
+                      0,
+                      Math.min(
+                        opened.takes.length - 1,
+                        Math.round(nativeEvent.contentOffset.x / (takeWidth + TAKE_GAP)),
+                      ),
+                    ),
+                  )
+                }
+                ref={takesRef}
+                style={[styles.takes, { width: pageWidth }]}
+                contentContainerStyle={{
+                  gap: TAKE_GAP,
+                  paddingHorizontal: (pageWidth - takeWidth) / 2,
+                }}>
+                {opened.takes.map((take, i) => {
+                  const isMain = take.source === opened.source;
+                  return (
+                    <Pressable
+                      key={take.id}
+                      onPress={() =>
+                        takesRef.current?.scrollTo({
+                          x: i * (takeWidth + TAKE_GAP),
+                          animated: true,
+                        })
+                      }
+                      accessibilityRole="button"
+                      accessibilityLabel={`Take ${i + 1} of ${opened.takes.length}${
+                        isMain ? ', main take' : ''
+                      }`}
+                      style={[
+                        styles.takeCard,
+                        { width: takeWidth, opacity: i === takeView ? 1 : 0.55 },
+                      ]}>
+                      <Image
+                        source={take.source}
+                        style={StyleSheet.absoluteFill}
+                        contentFit="cover"
+                      />
+                      <ThemedText style={styles.takeLabel}>Take {i + 1}</ThemedText>
+                      {isMain && (
+                        <View style={styles.takeMain}>
+                          <Icon name="check" size={10} color={FILM} />
+                        </View>
+                      )}
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+              {(() => {
+                const viewed = opened.takes[Math.min(takeView, opened.takes.length - 1)];
+                const isMain = viewed?.source === opened.source;
+                return (
+                  <View style={[styles.page, styles.takeBar]}>
+                    <View style={styles.takeDots}>
+                      {opened.takes.map((take, i) => (
+                        <View
+                          key={take.id}
+                          style={[
+                            styles.takeDot,
+                            i === takeView && styles.takeDotActive,
+                            take.source === opened.source && styles.takeDotMain,
+                          ]}
+                        />
+                      ))}
+                    </View>
+                    <ThemedText style={styles.mono}>
+                      TAKE {Math.min(takeView, opened.takes.length - 1) + 1} / {opened.takes.length}
+                    </ThemedText>
+                    <View style={styles.flex} />
+                    {isMain ? (
+                      <View style={styles.mainTag}>
+                        <Icon name="check" size={12} color={CUE} />
+                        <ThemedText type="caption" style={styles.cueText}>
+                          Main take
+                        </ThemedText>
+                      </View>
+                    ) : (
+                      <Pressable
+                        onPress={() => viewed && chooseMain(opened, viewed)}
+                        accessibilityRole="button"
+                        style={({ pressed }) => [styles.useMain, pressed && styles.pressed]}>
+                        <ThemedText type="caption" style={{ color: FILM, fontWeight: 600 }}>
+                          Use as main take
+                        </ThemedText>
+                      </Pressable>
+                    )}
+                  </View>
+                );
+              })()}
             </View>
 
             <View style={[styles.page, styles.detailBody]}>
@@ -387,6 +595,7 @@ export default function StoryboardScreen() {
               <TextInput
                 value={opened.note}
                 onChangeText={(note) => editNote(opened.id, note)}
+                autoFocus={narrating}
                 placeholder="Add narration for this moment…"
                 placeholderTextColor={MUTED}
                 accessibilityLabel={`Narration for panel ${open + 1}`}
@@ -418,6 +627,46 @@ export default function StoryboardScreen() {
           </View>
         )}
       </Modal>
+
+      <Modal
+        visible={!!pending}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setPending(null)}>
+        <Pressable
+          style={styles.flex}
+          onPress={() => setPending(null)}
+          accessibilityRole="button"
+          accessibilityLabel="Cancel"
+        />
+        {pending && (
+          <View style={[styles.choice, { paddingBottom: insets.bottom + Spacing.three }]}>
+            <ThemedText type="label" accessibilityRole="header" style={styles.white}>
+              {pending.kind === 'video' ? 'Add this video' : 'Add this photo'}
+            </ThemedText>
+            <Pressable
+              onPress={() => add(pending, true)}
+              accessibilityRole="button"
+              style={({ pressed }) => [styles.choiceRow, pressed && styles.pressed]}>
+              <ThemedText style={styles.white}>As a new take</ThemedText>
+              <ThemedText type="caption" style={styles.muted}>
+                {pending.kind === 'video'
+                  ? 'Each still joins the panel in the same place, so you can compare takes.'
+                  : `Joins panel ${current + 1} as another take.`}
+              </ThemedText>
+            </Pressable>
+            <Pressable
+              onPress={() => add(pending, false)}
+              accessibilityRole="button"
+              style={({ pressed }) => [styles.choiceRow, pressed && styles.pressed]}>
+              <ThemedText style={styles.white}>As new panels</ThemedText>
+              <ThemedText type="caption" style={styles.muted}>
+                Adds to the end of the storyboard.
+              </ThemedText>
+            </Pressable>
+          </View>
+        )}
+      </Modal>
     </View>
   );
 }
@@ -440,16 +689,18 @@ const styles = StyleSheet.create({
     minHeight: 48,
   },
   white: {
-    color: '#FFFFFF',
+    color: GREY[50],
   },
   muted: {
     color: MUTED,
   },
-  center: {
-    textAlign: 'center',
-  },
   flex: {
     flex: 1,
+  },
+  slateRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
   },
   slate: {
     marginTop: Spacing.four,
@@ -471,41 +722,147 @@ const styles = StyleSheet.create({
     fontVariant: ['tabular-nums'],
   },
   reel: {
-    marginTop: Spacing.three,
-    height: REEL_H,
-    flexGrow: 0,
+    position: 'absolute',
+    left: 0,
+    right: 0,
+  },
+  reelArea: {
+    flex: 1,
+    marginTop: Spacing.two,
   },
   slot: {
-    width: STEP,
-    height: REEL_H,
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'visible',
   },
   still: {
-    width: CARD_W,
-    height: CARD_H,
-    borderRadius: 4,
+    aspectRatio: 16 / 9,
+    borderRadius: 20,
     overflow: 'hidden',
     backgroundColor: SURFACE,
   },
-  empty: {
-    marginTop: Spacing.five,
-    alignItems: 'center',
-    gap: Spacing.three,
-    paddingVertical: Spacing.five,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderColor: LINE,
+  takesBadge: {
+    position: 'absolute',
+    right: Spacing.three - 4,
+    top: Spacing.three - 4,
+    paddingHorizontal: 8,
+    borderRadius: 9,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    fontFamily: MONO,
+    fontSize: 11,
+    lineHeight: 18,
+    color: GREY[50],
   },
-  primary: {
+  takes: {
+    flexGrow: 0,
+    alignSelf: 'center',
+  },
+  takeCard: {
+    aspectRatio: 16 / 9,
+    borderRadius: 20,
+    overflow: 'hidden',
+    backgroundColor: SURFACE,
+  },
+  takeLabel: {
+    position: 'absolute',
+    left: Spacing.three - 4,
+    bottom: Spacing.three - 4,
+    paddingHorizontal: 6,
+    borderRadius: 4,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    fontFamily: MONO,
+    fontSize: 10,
+    lineHeight: 16,
+    color: GREY[50],
+  },
+  takeMain: {
+    position: 'absolute',
+    right: Spacing.three - 4,
+    top: Spacing.three - 4,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: CUE,
+  },
+  takeBar: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: Spacing.three - 4,
+    marginTop: Spacing.three - 4,
+    minHeight: 32,
+  },
+  takeDots: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  takeDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: GREY[600],
+  },
+  takeDotActive: {
+    backgroundColor: GREY[50],
+  },
+  takeDotMain: {
+    borderWidth: 1.5,
+    borderColor: CUE,
+  },
+  mainTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  cueText: {
+    color: CUE,
+    fontWeight: 600,
+  },
+  useMain: {
+    minHeight: 32,
+    paddingHorizontal: Spacing.three - 2,
+    borderRadius: 16,
+    justifyContent: 'center',
+    backgroundColor: GREY[50],
+  },
+  choice: {
     gap: Spacing.two,
-    height: 48,
-    paddingHorizontal: Spacing.four,
-    borderRadius: 24,
-    backgroundColor: '#FFFFFF',
+    paddingTop: Spacing.three,
+    paddingHorizontal: Gutter,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    backgroundColor: SURFACE,
+  },
+  choiceRow: {
+    gap: 2,
+    padding: Spacing.three - 4,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  slotEmpty: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.two,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
+    borderColor: 'rgba(255, 255, 255, 0.24)',
+  },
+  badge: {
+    position: 'absolute',
+    left: Spacing.three - 4,
+    bottom: Spacing.three - 4,
+    paddingHorizontal: 6,
+    borderRadius: 4,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    fontFamily: MONO,
+    fontSize: 11,
+    lineHeight: 18,
+    color: GREY[50],
   },
   strip: {
     flexGrow: 0,
@@ -523,43 +880,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three - 2,
     borderRadius: 18,
     backgroundColor: SURFACE,
-  },
-  sheet: {
-    marginTop: Spacing.four,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  cell: {
-    minHeight: 64,
-    padding: Spacing.two,
-    gap: 2,
-    borderRadius: 6,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: LINE,
-  },
-  cellSelected: {
-    borderColor: '#FFFFFF',
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
-  },
-  cellNumber: {
-    fontFamily: MONO,
-    fontSize: 11,
-    lineHeight: 14,
-    color: MUTED,
-  },
-  cellNote: {
-    fontFamily: FontFamily,
-    fontSize: 13,
-    lineHeight: 17,
-    fontWeight: 600,
-    color: '#FFFFFF',
-  },
-  cellTime: {
-    fontFamily: MONO,
-    fontSize: 11,
-    lineHeight: 14,
-    color: MUTED,
   },
   round: {
     width: 44,
@@ -598,7 +918,7 @@ const styles = StyleSheet.create({
     fontFamily: FontFamily,
     fontSize: 17,
     lineHeight: 22,
-    color: '#FFFFFF',
+    color: GREY[50],
     textAlignVertical: 'top',
   },
   actions: {

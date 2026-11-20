@@ -5,12 +5,21 @@ import type { ArtworkSample, StyleValues } from '@/avatar/style';
 
 export type Artwork = { uri: string; sample: ArtworkSample };
 export type Shot = { id: string; kind: 'photo' | 'video'; uri: string; seconds?: number };
-export type Panel = {
+// One recording of a storyboard moment. A panel collects every take of the same moment.
+export type Take = {
   id: string;
   source: ImageProps['source'];
-  // Seconds into the source clip; null for panels made from a photo.
+  // Seconds into the source clip; null for takes made from a photo.
+  time: number | null;
+};
+
+export type Panel = {
+  id: string;
+  // The main take, which is what the reel shows.
+  source: ImageProps['source'];
   time: number | null;
   note: string;
+  takes: Take[];
 };
 
 type Studio = {
@@ -25,6 +34,11 @@ type Studio = {
   setShots: (update: (current: Shot[]) => Shot[]) => void;
   panels: Panel[];
   setPanels: (update: (current: Panel[]) => Panel[]) => void;
+  // Drawings of objects (props) and backdrops (sets), kept apart from the character's artwork.
+  props: string[];
+  setProps: (update: (current: string[]) => string[]) => void;
+  sets: string[];
+  setSets: (update: (current: string[]) => string[]) => void;
 };
 
 const StudioContext = createContext<Studio | null>(null);
@@ -35,6 +49,8 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const [overrides, setOverrides] = useState<Partial<StyleValues>>({});
   const [shots, setShots] = useState<Shot[]>([]);
   const [panels, setPanels] = useState<Panel[]>([]);
+  const [props, setProps] = useState<string[]>([]);
+  const [sets, setSets] = useState<string[]>([]);
 
   const value = useMemo(
     () => ({
@@ -48,8 +64,12 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       setShots,
       panels,
       setPanels,
+      props,
+      setProps,
+      sets,
+      setSets,
     }),
-    [photo, artworks, overrides, shots, panels],
+    [photo, artworks, overrides, shots, panels, props, sets],
   );
 
   return <StudioContext value={value}>{children}</StudioContext>;

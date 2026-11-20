@@ -40,10 +40,13 @@ export function Icon({
   name,
   size = 22,
   color = Colors.text,
+  weight = 'medium',
 }: {
   name: IconName;
   size?: number;
   color?: ColorValue;
+  // Stroke weight; the tab bar uses a light, line-drawn look.
+  weight?: 'ultraLight' | 'thin' | 'light' | 'regular' | 'medium';
 }) {
   const [ios, material] = ICONS[name];
   return (
@@ -51,7 +54,7 @@ export function Icon({
       name={{ ios, android: material, web: material }}
       size={size}
       tintColor={color}
-      weight="medium"
+      weight={weight}
     />
   );
 }

@@ -1,19 +1,19 @@
-import { useCanvasRef } from '@shopify/react-native-skia';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
-import { router } from 'expo-router';
+import { router, useIsFocused } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
 import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { canShare, saveAvatar, shareAvatar } from '@/avatar/export';
 import { sampleArtwork } from '@/avatar/sample-artwork';
 import { DEFAULT_STYLE, readStyle, type StyleValues } from '@/avatar/style';
-import { AvatarCanvas } from '@/components/avatar-canvas';
+import { DescribeSheet } from '@/components/describe-sheet';
+import { RecordStage } from '@/components/record-stage';
 import { Icon } from '@/components/icon';
 import { ThemedText } from '@/components/themed-text';
 import { TickSlider } from '@/components/ui';
-import { BOX, INK, LINE, PAPER, RoundButton, WirePill } from '@/components/wire';
+import { BOX, INK, LINE, PAPER, WirePill } from '@/components/wire';
 import { Colors, Gutter, MaxContentWidth, Spacing, TabBarSpace } from '@/constants/theme';
 import { useStudio } from '@/state/studio';
 
@@ -23,7 +23,9 @@ const MIN_ART = 3;
 const CARD_W = 100;
 const CARD_H = 124;
 // Same soft porcelain card as the Storyboard panels.
-const SOFT_CARD = '#F7F8FA';
+const SOFT_CARD = '#1C1C1E';
+const SOFT_FRAME = '#2C2C2E';
+const MUTED = '#8E8E93';
 
 // Where each added artwork floats around the figure, like tags on a model.
 const CHIP_SPOTS = [
@@ -33,28 +35,175 @@ const CHIP_SPOTS = [
   { right: '12%', top: '14%' },
 ] as const;
 
-// Dashed stand-in for the person before a photo is added.
-function FigurePlaceholder() {
+const SECTIONS = [
+  { key: 'character', label: 'Character' },
+  { key: 'props', label: 'Props' },
+  { key: 'set', label: 'Set' },
+] as const;
+type Section = (typeof SECTIONS)[number]['key'];
+
+const LIBRARY = {
+  props: {
+    noun: 'prop',
+    empty: 'Add drawings of objects your character can hold or use.',
+  },
+  set: {
+    noun: 'set',
+    empty: 'Add a backdrop for your character to perform in.',
+  },
+} as const;
+
+// Opens the sheet where you type or dictate something for FLUX to draw.
+function DescribeCard({ onPress }: { onPress: () => void }) {
   return (
-    <View style={styles.figure} accessible accessibilityLabel="No photo yet">
-      <View style={[styles.dashed, styles.figureHead]} />
-      <View style={[styles.dashed, styles.figureBody]} />
-      <View style={styles.figureLegs}>
-        <View style={[styles.dashed, styles.figureLeg]} />
-        <View style={[styles.dashed, styles.figureLeg]} />
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel="Describe one to make it"
+      style={({ pressed }) => [styles.card, styles.cardNext, pressed && styles.pressed]}>
+      <View style={[styles.cardFrame, styles.cardDashed]}>
+        <View style={styles.cardPlus}>
+          <Icon name="sparkles" size={18} color={INK} />
+        </View>
+        <ThemedText type="caption" style={styles.muted}>
+          Describe
+        </ThemedText>
       </View>
-    </View>
+    </Pressable>
+  );
+}
+
+// Props and sets: a large preview of the chosen drawing over a row of soft cards.
+function Library({
+  kind,
+  items,
+  setItems,
+}: {
+  kind: keyof typeof LIBRARY;
+  items: string[];
+  setItems: (update: (current: string[]) => string[]) => void;
+}) {
+  const [selected, setSelected] = useState(0);
+  const [describing, setDescribing] = useState(false);
+  const copy = LIBRARY[kind];
+  const index = Math.min(selected, items.length - 1);
+  const current = items[index];
+
+  async function add() {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsMultipleSelection: true,
+      quality: 0.8,
+    });
+    if (result.canceled) return;
+    setSelected(items.length);
+    setItems((existing) => [...existing, ...result.assets.map((asset) => asset.uri)]);
+  }
+
+  function remove(uri: string) {
+    setItems((existing) => existing.filter((item) => item !== uri));
+    setSelected((i) => Math.max(0, i - 1));
+  }
+
+  return (
+    <>
+      <View style={styles.stage}>
+        {current ? (
+          <View style={[styles.preview, kind === 'set' ? styles.previewSet : styles.previewProp]}>
+            <Image
+              source={{ uri: current }}
+              style={StyleSheet.absoluteFill}
+              contentFit={kind === 'set' ? 'cover' : 'contain'}
+              accessibilityLabel={`${copy.noun} ${index + 1}`}
+            />
+          </View>
+        ) : (
+          <>
+            <View
+              style={[styles.dashed, kind === 'set' ? styles.emptySet : styles.emptyProp]}
+              accessible
+              accessibilityLabel={`No ${copy.noun}s yet`}
+            />
+            <ThemedText type="caption" style={[styles.hint, styles.center]}>
+              {copy.empty}
+            </ThemedText>
+          </>
+        )}
+      </View>
+
+      <View style={styles.pills}>
+        <ThemedText type="caption" style={styles.count}>
+          {items.length} {items.length === 1 ? copy.noun : `${copy.noun}s`}
+        </ThemedText>
+        {current ? (
+          <WirePill icon="close" onPress={() => remove(current)}>
+            Remove
+          </WirePill>
+        ) : null}
+      </View>
+
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.carousel}
+        contentContainerStyle={styles.cards}>
+        {items.map((uri, i) => (
+          <Pressable
+            key={uri}
+            onPress={() => setSelected(i)}
+            accessibilityRole="button"
+            accessibilityLabel={`${copy.noun} ${i + 1}`}
+            accessibilityState={{ selected: i === index }}
+            style={[styles.card, i === index && styles.cardSelected]}>
+            <View style={styles.cardFrame}>
+              <Image source={{ uri }} style={StyleSheet.absoluteFill} contentFit="cover" />
+            </View>
+            <View style={styles.cardBadge}>
+              <ThemedText type="caption" style={styles.cardBadgeText}>
+                {i + 1}
+              </ThemedText>
+            </View>
+          </Pressable>
+        ))}
+        <Pressable
+          onPress={add}
+          accessibilityRole="button"
+          accessibilityLabel={`Add ${copy.noun}`}
+          style={({ pressed }) => [styles.card, styles.cardNext, pressed && styles.pressed]}>
+          <View style={[styles.cardFrame, styles.cardDashed]}>
+            <View style={styles.cardPlus}>
+              <Icon name="add" size={18} color={INK} />
+            </View>
+            <ThemedText type="caption" style={styles.muted}>
+              Add
+            </ThemedText>
+          </View>
+        </Pressable>
+        <DescribeCard onPress={() => setDescribing(true)} />
+      </ScrollView>
+
+      <DescribeSheet
+        kind={kind}
+        visible={describing}
+        onClose={() => setDescribing(false)}
+        onCreated={(uri) => {
+          setSelected(items.length);
+          setItems((existing) => [...existing, uri]);
+        }}
+      />
+    </>
   );
 }
 
 export default function CreateScreen() {
   const insets = useSafeAreaInsets();
-  const canvasRef = useCanvasRef();
-  const { photo, setPhoto, artworks, setArtworks, overrides, setOverrides } = useStudio();
+  const { artworks, setArtworks, overrides, setOverrides, props, setProps, sets, setSets } =
+    useStudio();
+  const [section, setSection] = useState<Section>('character');
+  const [describing, setDescribing] = useState(false);
+  const isFocused = useIsFocused();
   const [status, setStatus] = useState('');
-  const [busy, setBusy] = useState(false);
   const [showStyle, setShowStyle] = useState(false);
-  const [stage, setStage] = useState(0);
 
   const samples = artworks.map((a) => a.sample);
   const analysed = useMemo(
@@ -64,34 +213,6 @@ export default function CreateScreen() {
     [artworks],
   );
   const style = { ...analysed, ...overrides };
-
-  async function takePhoto() {
-    setStatus('');
-    const { granted } = await ImagePicker.requestCameraPermissionsAsync();
-    if (!granted) {
-      setStatus('Allow camera access in Settings to take a photo.');
-      return;
-    }
-    const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ['images'],
-      allowsEditing: true,
-      aspect: [1, 1],
-      cameraType: ImagePicker.CameraType.front,
-      quality: 0.9,
-    });
-    if (!result.canceled) setPhoto(result.assets[0].uri);
-  }
-
-  async function choosePhoto() {
-    setStatus('');
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      allowsEditing: true,
-      aspect: [1, 1],
-      quality: 0.9,
-    });
-    if (!result.canceled) setPhoto(result.assets[0].uri);
-  }
 
   async function addArtwork() {
     setStatus('');
@@ -116,6 +237,16 @@ export default function CreateScreen() {
     }
   }
 
+  async function addDescribedArtwork(uri: string) {
+    try {
+      const sample = await sampleArtwork(uri);
+      setArtworks((current) => [...current, { uri, sample }].slice(0, MAX_ART));
+      setOverrides(() => ({}));
+    } catch {
+      setStatus('That drawing could not be read. Try describing it again.');
+    }
+  }
+
   function removeArtwork(uri: string) {
     setArtworks((current) => current.filter((a) => a.uri !== uri));
     setOverrides(() => ({}));
@@ -125,30 +256,22 @@ export default function CreateScreen() {
     setOverrides((current) => ({ ...current, [key]: value }));
   }
 
-  async function save(action: 'save' | 'share') {
-    const image = canvasRef.current?.makeImageSnapshot();
-    if (!image) return;
-    setBusy(true);
+  // A recorded or uploaded clip goes straight to Animate, which wraps the artwork round you.
+  function animateClip(uri: string) {
+    router.push({ pathname: '/animate', params: { clip: uri } });
+  }
+
+  async function uploadClip() {
     setStatus('');
-    try {
-      if (action === 'share') {
-        await shareAvatar(image);
-      } else if ((await saveAvatar(image)) === 'denied') {
-        setStatus('Allow adding photos in Settings to save your avatar.');
-      } else {
-        setStatus('Avatar saved.');
-      }
-    } catch {
-      setStatus('That did not work. Please try again.');
-    } finally {
-      setBusy(false);
-    }
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['videos'] });
+    if (!result.canceled) animateClip(result.assets[0].uri);
   }
 
   const emptySlots = Math.max(0, MAX_ART - artworks.length - 1);
 
   return (
     <View style={styles.root}>
+      {isFocused && <StatusBar style="light" />}
       <View
         style={[
           styles.page,
@@ -158,163 +281,174 @@ export default function CreateScreen() {
           },
         ]}>
         <View style={styles.top}>
-          <RoundButton icon="camera" label="Take photo" onPress={takePhoto} />
-          <ThemedText type="label" accessibilityRole="header" style={styles.title}>
+          <ThemedText type="title" accessibilityRole="header" style={styles.title}>
             Artwork
           </ThemedText>
-          <RoundButton icon="photo" label="Upload photo" onPress={choosePhoto} />
         </View>
 
-        <View
-          style={styles.stage}
-          onLayout={({ nativeEvent: { layout } }) =>
-            setStage(Math.floor(Math.min(layout.width, layout.height)))
-          }>
-          {photo && stage > 0 ? (
-            <AvatarCanvas uri={photo} style={style} size={stage} canvasRef={canvasRef} />
-          ) : !photo ? (
-            <>
-              <FigurePlaceholder />
-              <ThemedText type="caption" style={styles.hint}>
-                Take a selfie or upload a photo to start
-              </ThemedText>
-            </>
-          ) : null}
-
-          {artworks.map((art, i) => (
-            <Pressable
-              key={art.uri}
-              onPress={() => removeArtwork(art.uri)}
-              accessibilityRole="button"
-              accessibilityLabel={`Remove artwork ${i + 1}`}
-              hitSlop={6}
-              style={[styles.chip, CHIP_SPOTS[i % CHIP_SPOTS.length]]}>
-              <Image source={{ uri: art.uri }} style={styles.chipImage} contentFit="cover" />
-              <View style={styles.chipRemove}>
-                <Icon name="close" size={10} color={BOX} />
-              </View>
-            </Pressable>
-          ))}
-
-          {showStyle && (
-            <View style={styles.panel}>
-              <TickSlider
-                label="Outline"
-                low="Soft"
-                high="Bold"
-                value={style.line}
-                onChange={(v) => adjust('line', v)}
+        {section === 'props' ? (
+          <Library kind="props" items={props} setItems={setProps} />
+        ) : section === 'set' ? (
+          <Library kind="set" items={sets} setItems={setSets} />
+        ) : (
+          <>
+            <View style={[styles.stage, styles.stageCamera]}>
+              <RecordStage
+                active={isFocused && section === 'character'}
+                ready={artworks.length > 0}
+                onRecorded={animateClip}
+                onStatus={setStatus}
               />
-              <TickSlider
-                label="Detail"
-                low="Simple"
-                high="Complex"
-                value={style.detail}
-                onChange={(v) => adjust('detail', v)}
-              />
-              <TickSlider
-                label="Texture"
-                low="Clean"
-                high="Grainy"
-                value={style.texture}
-                onChange={(v) => adjust('texture', v)}
-              />
-            </View>
-          )}
-        </View>
 
-        {status ? (
-          <ThemedText type="caption" style={styles.status} accessibilityLiveRegion="polite">
-            {status}
-          </ThemedText>
-        ) : null}
+              {artworks.map((art, i) => (
+                <Pressable
+                  key={art.uri}
+                  onPress={() => removeArtwork(art.uri)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Remove artwork ${i + 1}`}
+                  hitSlop={6}
+                  style={[styles.chip, CHIP_SPOTS[i % CHIP_SPOTS.length]]}>
+                  <Image source={{ uri: art.uri }} style={styles.chipImage} contentFit="cover" />
+                  <View style={styles.chipRemove}>
+                    <Icon name="close" size={10} color={BOX} />
+                  </View>
+                </Pressable>
+              ))}
 
-        <View style={styles.pills}>
-          <View style={styles.pillGroup}>
-            <WirePill icon="style" selected={showStyle} onPress={() => setShowStyle(!showStyle)}>
-              Style
-            </WirePill>
-            <WirePill
-              icon="animate"
-              disabled={!artworks.length}
-              onPress={() => router.push('/animate')}>
-              Animate
-            </WirePill>
-          </View>
-          {canShare ? (
-            <WirePill icon="share" disabled={!photo || busy} onPress={() => save('share')}>
-              Share
-            </WirePill>
-          ) : (
-            <ThemedText type="caption" style={styles.count}>
-              {artworks.length} of {MAX_ART} artworks
-            </ThemedText>
-          )}
-        </View>
-
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.carousel}
-          contentContainerStyle={styles.cards}>
-          {artworks.map((art, i) => (
-            <View key={art.uri} style={styles.card}>
-              <View style={styles.cardFrame}>
-                <Image
-                  source={{ uri: art.uri }}
-                  style={StyleSheet.absoluteFill}
-                  contentFit="cover"
-                  accessibilityLabel={`Artwork ${i + 1}, in use`}
-                />
-              </View>
-              <View style={styles.cardBadge}>
-                <ThemedText type="caption" style={styles.cardBadgeText}>
-                  {i + 1}
-                </ThemedText>
-              </View>
-            </View>
-          ))}
-          {artworks.length < MAX_ART && (
-            <Pressable
-              onPress={addArtwork}
-              accessibilityRole="button"
-              accessibilityLabel="Add artwork"
-              style={({ pressed }) => [styles.card, styles.cardNext, pressed && styles.pressed]}>
-              <View style={[styles.cardFrame, styles.cardDashed]}>
-                <View style={styles.cardPlus}>
-                  <Icon name="add" size={18} color={Colors.text} />
+              {showStyle && (
+                <View style={styles.panel}>
+                  <TickSlider
+                    label="Outline"
+                    low="Soft"
+                    high="Bold"
+                    value={style.line}
+                    onChange={(v) => adjust('line', v)}
+                  />
+                  <TickSlider
+                    label="Detail"
+                    low="Simple"
+                    high="Complex"
+                    value={style.detail}
+                    onChange={(v) => adjust('detail', v)}
+                  />
+                  <TickSlider
+                    label="Texture"
+                    low="Clean"
+                    high="Grainy"
+                    value={style.texture}
+                    onChange={(v) => adjust('texture', v)}
+                  />
                 </View>
-                <ThemedText type="caption" themeColor="textSecondary">
-                  {artworks.length < MIN_ART ? `${MIN_ART - artworks.length} more` : 'Add'}
-                </ThemedText>
-              </View>
-            </Pressable>
-          )}
-          {Array.from({ length: emptySlots }, (_, i) => (
-            <View key={i} style={[styles.card, styles.cardNext]}>
-              <View style={[styles.cardFrame, styles.cardDashed]}>
-                <ThemedText type="caption" themeColor="textTertiary">
-                  {artworks.length + i + 2}
-                </ThemedText>
-              </View>
+              )}
             </View>
-          ))}
-        </ScrollView>
 
-        <Pressable
-          onPress={() => save('save')}
-          disabled={!photo || busy}
-          accessibilityRole="button"
-          accessibilityState={{ disabled: !photo || busy }}
-          style={({ pressed }) => [
-            styles.save,
-            (!photo || busy) && styles.disabled,
-            pressed && styles.pressed,
-          ]}>
-          <ThemedText type="label" style={{ color: BOX }}>
-            Save avatar
-          </ThemedText>
-        </Pressable>
+            {status ? (
+              <ThemedText type="caption" style={styles.status} accessibilityLiveRegion="polite">
+                {status}
+              </ThemedText>
+            ) : null}
+
+            <View style={styles.pills}>
+              <View style={styles.pillGroup}>
+                <WirePill
+                  icon="style"
+                  selected={showStyle}
+                  onPress={() => setShowStyle(!showStyle)}>
+                  Style
+                </WirePill>
+                <WirePill icon="upload" disabled={!artworks.length} onPress={uploadClip}>
+                  Upload video
+                </WirePill>
+              </View>
+              <ThemedText type="caption" style={styles.count}>
+                {artworks.length} of {MAX_ART} artworks
+              </ThemedText>
+            </View>
+
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.carousel}
+              contentContainerStyle={styles.cards}>
+              {artworks.map((art, i) => (
+                <View key={art.uri} style={styles.card}>
+                  <View style={styles.cardFrame}>
+                    <Image
+                      source={{ uri: art.uri }}
+                      style={StyleSheet.absoluteFill}
+                      contentFit="cover"
+                      accessibilityLabel={`Artwork ${i + 1}, in use`}
+                    />
+                  </View>
+                  <View style={styles.cardBadge}>
+                    <ThemedText type="caption" style={styles.cardBadgeText}>
+                      {i + 1}
+                    </ThemedText>
+                  </View>
+                </View>
+              ))}
+              {artworks.length < MAX_ART && (
+                <Pressable
+                  onPress={addArtwork}
+                  accessibilityRole="button"
+                  accessibilityLabel="Add artwork"
+                  style={({ pressed }) => [
+                    styles.card,
+                    styles.cardNext,
+                    pressed && styles.pressed,
+                  ]}>
+                  <View style={[styles.cardFrame, styles.cardDashed]}>
+                    <View style={styles.cardPlus}>
+                      <Icon name="add" size={18} color={INK} />
+                    </View>
+                    <ThemedText type="caption" style={styles.muted}>
+                      {artworks.length < MIN_ART ? `${MIN_ART - artworks.length} more` : 'Add'}
+                    </ThemedText>
+                  </View>
+                </Pressable>
+              )}
+              {artworks.length < MAX_ART && <DescribeCard onPress={() => setDescribing(true)} />}
+              {Array.from({ length: emptySlots }, (_, i) => (
+                <View key={i} style={[styles.card, styles.cardNext]}>
+                  <View style={[styles.cardFrame, styles.cardDashed]}>
+                    <ThemedText type="caption" style={styles.muted}>
+                      {artworks.length + i + 2}
+                    </ThemedText>
+                  </View>
+                </View>
+              ))}
+            </ScrollView>
+
+            <DescribeSheet
+              kind="character"
+              visible={describing}
+              onClose={() => setDescribing(false)}
+              onCreated={addDescribedArtwork}
+            />
+          </>
+        )}
+
+        {/* Sits just above the tab bar, so the sections switch within thumb reach. */}
+        <View style={styles.segments} accessibilityRole="tablist">
+          {SECTIONS.map((option) => {
+            const selected = option.key === section;
+            return (
+              <Pressable
+                key={option.key}
+                onPress={() => setSection(option.key)}
+                accessibilityRole="tab"
+                accessibilityState={{ selected }}
+                style={[styles.segment, selected && styles.segmentSelected]}>
+                <ThemedText
+                  type="caption"
+                  maxFontSizeMultiplier={1.3}
+                  style={[styles.segmentText, selected && { color: BOX }]}>
+                  {option.label}
+                </ThemedText>
+              </Pressable>
+            );
+          })}
+        </View>
       </View>
     </View>
   );
@@ -332,52 +466,95 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     gap: Spacing.three - 4,
   },
+  // Same title bar as Storyboards: large title, left-aligned, 48 points tall.
   top: {
+    minHeight: 48,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     paddingHorizontal: Gutter,
   },
   title: {
     color: INK,
-    fontWeight: 600,
+  },
+  stageCamera: {
+    marginHorizontal: Gutter,
+    paddingHorizontal: 0,
   },
   stage: {
     flex: 1,
+    paddingHorizontal: Gutter,
     alignItems: 'center',
     justifyContent: 'center',
     gap: Spacing.three,
   },
   hint: {
     color: INK,
+    maxWidth: 260,
   },
-  figure: {
+  center: {
+    textAlign: 'center',
+  },
+  muted: {
+    color: MUTED,
+  },
+  segments: {
+    alignSelf: 'center',
+    flexDirection: 'row',
+    padding: 2,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 255, 255, 0.5)',
+    backgroundColor: BOX,
+  },
+  segment: {
+    minHeight: 26,
+    paddingHorizontal: Spacing.three - 4,
+    borderRadius: 14,
     alignItems: 'center',
-    gap: 6,
+    justifyContent: 'center',
+  },
+  segmentSelected: {
+    backgroundColor: INK,
+  },
+  segmentText: {
+    color: INK,
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: 600,
+  },
+  preview: {
+    width: '100%',
+    maxWidth: 360,
+    borderRadius: 20,
+    overflow: 'hidden',
+    backgroundColor: BOX,
+    borderWidth: LINE,
+    borderColor: INK,
+  },
+  previewProp: {
+    aspectRatio: 1,
+    maxHeight: '100%',
+  },
+  previewSet: {
+    aspectRatio: 16 / 9,
+  },
+  emptyProp: {
+    width: 120,
+    height: 120,
+    borderRadius: 20,
+  },
+  emptySet: {
+    width: 240,
+    height: 135,
+    borderRadius: 20,
+  },
+  cardSelected: {
+    borderColor: INK,
   },
   dashed: {
     borderWidth: LINE,
     borderColor: INK,
     borderStyle: 'dashed',
-  },
-  figureHead: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-  },
-  figureBody: {
-    width: 104,
-    height: 120,
-    borderRadius: 22,
-  },
-  figureLegs: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  figureLeg: {
-    width: 40,
-    height: 110,
-    borderRadius: 16,
   },
   chip: {
     position: 'absolute',
@@ -454,18 +631,18 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     backgroundColor: SOFT_CARD,
     borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
-    boxShadow: '0px 8px 20px rgba(30, 40, 60, 0.10)',
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    boxShadow: '0px 8px 20px rgba(0, 0, 0, 0.4)',
   },
   cardNext: {
-    backgroundColor: 'rgba(247, 248, 250, 0.6)',
+    backgroundColor: 'rgba(28, 28, 30, 0.6)',
     boxShadow: '0px 4px 12px rgba(30, 40, 60, 0.05)',
   },
   cardFrame: {
     flex: 1,
     borderRadius: 15,
     overflow: 'hidden',
-    backgroundColor: '#E4E7EC',
+    backgroundColor: SOFT_FRAME,
   },
   cardDashed: {
     alignItems: 'center',
@@ -474,7 +651,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
     borderWidth: 1.5,
     borderStyle: 'dashed',
-    borderColor: Colors.dot,
+    borderColor: 'rgba(255, 255, 255, 0.24)',
   },
   cardPlus: {
     width: 36,
@@ -482,7 +659,7 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FFFFFF',
+    backgroundColor: SOFT_FRAME,
     boxShadow: '0px 4px 12px rgba(30, 40, 60, 0.10)',
   },
   cardBadge: {
@@ -495,11 +672,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FFFFFF',
+    backgroundColor: SOFT_FRAME,
     boxShadow: '0px 2px 8px rgba(30, 40, 60, 0.12)',
   },
   cardBadgeText: {
-    color: Colors.text,
+    color: INK,
     fontWeight: 600,
     fontVariant: ['tabular-nums'],
   },

@@ -11,7 +11,7 @@ import {
 } from '@shopify/react-native-skia';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -31,6 +31,8 @@ import { formatTime } from '@/video/timing';
 export default function AnimateScreen() {
   const insets = useSafeAreaInsets();
   const { artworks, shots } = useStudio();
+  // A clip recorded on the Character stage arrives here to be animated straight away.
+  const { clip } = useLocalSearchParams<{ clip?: string }>();
   const clips = shots.filter((s) => s.kind === 'video');
 
   const [artIndex, setArtIndex] = useState(0);
@@ -68,6 +70,15 @@ export default function AnimateScreen() {
       if (id === run.current) setProgress(null);
     }
   }
+
+  useEffect(() => {
+    if (!clip || !artworks.length) return;
+    // Deferred so tracking starts after this render rather than inside the effect.
+    const start = setTimeout(() => animate(clip), 0);
+    return () => clearTimeout(start);
+    // Run once per clip; artworks only gate whether there's anything to wear.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clip]);
 
   async function upload() {
     const result = await ImagePicker.launchImageLibraryAsync({
