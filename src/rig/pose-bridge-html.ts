@@ -48,9 +48,15 @@ function toBase64(bytes) {
   return btoa(text);
 }
 
-async function frame({ id, index, step, data }) {
+async function frame({ id, index, step, data, resize }) {
   const blob = await (await fetch('data:image/jpeg;base64,' + data)).blob();
-  const bitmap = await createImageBitmap(blob);
+  // Live camera snapshots arrive full size; shrink them as they decode when asked.
+  let bitmap = await createImageBitmap(blob);
+  if (resize && bitmap.width > resize) {
+    const height = Math.round((resize * bitmap.height) / bitmap.width);
+    bitmap.close();
+    bitmap = await createImageBitmap(blob, { resizeWidth: resize, resizeHeight: height, resizeQuality: 'low' });
+  }
   clock += step;
   const result = landmarker.detectForVideo(bitmap, clock);
   const found = result.landmarks[0];

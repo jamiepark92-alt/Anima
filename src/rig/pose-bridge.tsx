@@ -116,8 +116,15 @@ export function PoseBridge() {
   const webView = useRef<WebViewHandle>(null);
 
   useEffect(() => {
-    send = (message) => webView.current?.postMessage(message);
+    const mine = (message: string) => webView.current?.postMessage(message);
+    send = mine;
+    // A newly mounted page hasn't loaded MediaPipe yet; wait for its own "ready".
+    ready = false;
+    failure = null;
     return () => {
+      // Animate and the live camera can each mount a bridge; closing one mustn't cut off
+      // the other, so only tear down if this bridge is still the one in use.
+      if (send !== mine) return;
       send = null;
       ready = false;
       failure = null;

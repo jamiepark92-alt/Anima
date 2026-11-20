@@ -54,6 +54,21 @@ function once(target: HTMLVideoElement, event: string) {
 // Each run gets later timestamps than the last, as the VIDEO mode requires.
 let clock = 0;
 
+// One frame from the live camera: landmarks, plus the body mask when asked for (used once,
+// to fit the artwork to the body). Shares the clock with trackVideo so timestamps only rise.
+export async function detectLiveFrame(source: HTMLCanvasElement, withMask: boolean) {
+  const detector = await loadLandmarker();
+  clock = Math.max(clock + 1, performance.now());
+  const result = detector.detectForVideo(source, clock);
+  const landmarks = result.landmarks[0] ?? null;
+  const mask = withMask ? result.segmentationMasks?.[0] : undefined;
+  const silhouette = mask
+    ? { width: mask.width, height: mask.height, data: mask.getAsFloat32Array().slice() }
+    : null;
+  result.close();
+  return { landmarks, silhouette };
+}
+
 export async function trackVideo(uri: string, options: TrackOptions = {}): Promise<Performance> {
   const fps = options.fps ?? TRACK_FPS;
   const [detector, video] = await Promise.all([

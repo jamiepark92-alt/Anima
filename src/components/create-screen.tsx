@@ -296,6 +296,7 @@ export default function CreateScreen() {
               <RecordStage
                 active={isFocused && section === 'character'}
                 ready={artworks.length > 0}
+                art={artworks[0]?.uri}
                 onRecorded={animateClip}
                 onStatus={setStatus}
               />
