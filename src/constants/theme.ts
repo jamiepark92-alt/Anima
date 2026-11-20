@@ -40,4 +40,4 @@ export const Radius = { tile: 14, card: 20 } as const;
 export const Gutter = Spacing.three;
 export const MaxContentWidth = 560;
 // Room left under scrolling content for the floating tab bar.
-export const TabBarSpace = 112;
+export const TabBarSpace = 88;

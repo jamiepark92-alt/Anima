@@ -1,18 +1,17 @@
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
+import { LinearGradient } from 'expo-linear-gradient';
 import { router, useIsFocused } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { sampleArtwork } from '@/avatar/sample-artwork';
-import { DEFAULT_STYLE, readStyle, type StyleValues } from '@/avatar/style';
 import { DescribeSheet } from '@/components/describe-sheet';
 import { RecordStage } from '@/components/record-stage';
 import { Icon } from '@/components/icon';
 import { ThemedText } from '@/components/themed-text';
-import { TickSlider } from '@/components/ui';
 import { BOX, INK, LINE, PAPER, WirePill } from '@/components/wire';
 import { Colors, Gutter, MaxContentWidth, Spacing, TabBarSpace } from '@/constants/theme';
 import { useStudio } from '@/state/studio';
@@ -197,22 +196,14 @@ function Library({
 
 export default function CreateScreen() {
   const insets = useSafeAreaInsets();
-  const { artworks, setArtworks, overrides, setOverrides, props, setProps, sets, setSets } =
-    useStudio();
+  const { artworks, setArtworks, setOverrides, props, setProps, sets, setSets } = useStudio();
   const [section, setSection] = useState<Section>('character');
+  // Where the open camera area sits on screen, so the record button and hint can sit in it.
+  const [finder, setFinder] = useState({ top: 0, bottom: 0 });
+  const [screenHeight, setScreenHeight] = useState(0);
   const [describing, setDescribing] = useState(false);
   const isFocused = useIsFocused();
   const [status, setStatus] = useState('');
-  const [showStyle, setShowStyle] = useState(false);
-
-  const samples = artworks.map((a) => a.sample);
-  const analysed = useMemo(
-    () => (samples.length ? readStyle(samples) : DEFAULT_STYLE),
-    // The samples are immutable, so the list of artworks identifies them.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [artworks],
-  );
-  const style = { ...analysed, ...overrides };
 
   async function addArtwork() {
     setStatus('');
@@ -252,10 +243,6 @@ export default function CreateScreen() {
     setOverrides(() => ({}));
   }
 
-  function adjust(key: keyof StyleValues, value: number) {
-    setOverrides((current) => ({ ...current, [key]: value }));
-  }
-
   // A recorded or uploaded clip goes straight to Animate, which wraps the artwork round you.
   function animateClip(uri: string) {
     router.push({ pathname: '/animate', params: { clip: uri } });
@@ -269,10 +256,38 @@ export default function CreateScreen() {
 
   const emptySlots = Math.max(0, MAX_ART - artworks.length - 1);
 
+  const character = section === 'character';
+
   return (
-    <View style={styles.root}>
+    <View
+      style={styles.root}
+      onLayout={({ nativeEvent: { layout } }) => setScreenHeight(layout.height)}>
       {isFocused && <StatusBar style="light" />}
+      {character && (
+        <>
+          {/* On Character the camera fills the page; everything else floats on top of it. */}
+          <RecordStage
+            active={isFocused}
+            ready={artworks.length > 0}
+            art={artworks[0]?.uri}
+            onRecorded={animateClip}
+            onStatus={setStatus}
+            fullBleed={{ top: finder.top, bottom: Math.max(0, screenHeight - finder.bottom) }}
+          />
+          <LinearGradient
+            pointerEvents="none"
+            colors={['rgba(0, 0, 0, 0.6)', 'rgba(0, 0, 0, 0)']}
+            style={[styles.fadeTop, { height: insets.top + 110 }]}
+          />
+          <LinearGradient
+            pointerEvents="none"
+            colors={['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0.78)']}
+            style={styles.fadeBottom}
+          />
+        </>
+      )}
       <View
+        pointerEvents="box-none"
         style={[
           styles.page,
           {
@@ -292,15 +307,13 @@ export default function CreateScreen() {
           <Library kind="set" items={sets} setItems={setSets} />
         ) : (
           <>
-            <View style={[styles.stage, styles.stageCamera]}>
-              <RecordStage
-                active={isFocused && section === 'character'}
-                ready={artworks.length > 0}
-                art={artworks[0]?.uri}
-                onRecorded={animateClip}
-                onStatus={setStatus}
-              />
-
+            {/* The open camera area between the title and the controls below it. */}
+            <View
+              style={styles.stage}
+              pointerEvents="box-none"
+              onLayout={({ nativeEvent: { layout } }) =>
+                setFinder({ top: layout.y, bottom: layout.y + layout.height })
+              }>
               {artworks.map((art, i) => (
                 <Pressable
                   key={art.uri}
@@ -315,32 +328,6 @@ export default function CreateScreen() {
                   </View>
                 </Pressable>
               ))}
-
-              {showStyle && (
-                <View style={styles.panel}>
-                  <TickSlider
-                    label="Outline"
-                    low="Soft"
-                    high="Bold"
-                    value={style.line}
-                    onChange={(v) => adjust('line', v)}
-                  />
-                  <TickSlider
-                    label="Detail"
-                    low="Simple"
-                    high="Complex"
-                    value={style.detail}
-                    onChange={(v) => adjust('detail', v)}
-                  />
-                  <TickSlider
-                    label="Texture"
-                    low="Clean"
-                    high="Grainy"
-                    value={style.texture}
-                    onChange={(v) => adjust('texture', v)}
-                  />
-                </View>
-              )}
             </View>
 
             {status ? (
@@ -351,12 +338,6 @@ export default function CreateScreen() {
 
             <View style={styles.pills}>
               <View style={styles.pillGroup}>
-                <WirePill
-                  icon="style"
-                  selected={showStyle}
-                  onPress={() => setShowStyle(!showStyle)}>
-                  Style
-                </WirePill>
                 <WirePill icon="upload" disabled={!artworks.length} onPress={uploadClip}>
                   Upload video
                 </WirePill>
@@ -477,9 +458,18 @@ const styles = StyleSheet.create({
   title: {
     color: INK,
   },
-  stageCamera: {
-    marginHorizontal: Gutter,
-    paddingHorizontal: 0,
+  fadeTop: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+  },
+  fadeBottom: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: '48%',
   },
   stage: {
     flex: 1,

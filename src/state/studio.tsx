@@ -2,6 +2,7 @@ import type { ImageProps } from 'expo-image';
 import { createContext, use, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import type { ArtworkSample, StyleValues } from '@/avatar/style';
+import { loadBoard, saveBoard } from '@/state/board';
 import { keepImage, loadLibrary, saveLibrary } from '@/state/library';
 
 export type Artwork = { uri: string; sample: ArtworkSample };
@@ -21,6 +22,31 @@ export type Panel = {
   time: number | null;
   note: string;
   takes: Take[];
+  // How the panel plays in the cut; missing means the defaults. Kept apart from the takes so
+  // switching the main take keeps the edit.
+  edit?: PanelEdit;
+};
+
+export type Transition = 'cut' | 'fade' | 'dissolve' | 'wipe';
+export type PanelEdit = {
+  // Seconds the panel stays on screen, before speed.
+  length: number;
+  speed: number;
+  // A film look id from the camera, or null for none.
+  look: string | null;
+  zoom: number;
+  flipped: boolean;
+  // How this panel comes in from the one before.
+  transition: Transition;
+};
+
+export const DEFAULT_EDIT: PanelEdit = {
+  length: 3,
+  speed: 1,
+  look: null,
+  zoom: 1,
+  flipped: false,
+  transition: 'cut',
 };
 
 type Studio = {
@@ -97,6 +123,32 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       cancelled = true;
     };
   }, [restored, artworks, props, sets]);
+
+  // The storyboard is saved too, so a relaunch doesn't empty the board: takes, the main
+  // take, narration and edits all come back.
+  const [boardRestored, setBoardRestored] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadBoard()
+      .then((saved) => {
+        if (!cancelled && saved?.length) setPanels((current) => (current.length ? current : saved));
+      })
+      .catch((error) => console.warn('[board] could not load the storyboard:', error))
+      .finally(() => !cancelled && setBoardRestored(true));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!boardRestored) return;
+    // Wait for a pause so typing narration doesn't write on every key.
+    const timer = setTimeout(() => {
+      saveBoard(panels).catch((error) => console.warn('[board] could not save:', error));
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [boardRestored, panels]);
 
   const value = useMemo(
     () => ({

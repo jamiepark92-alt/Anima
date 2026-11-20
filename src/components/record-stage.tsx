@@ -21,11 +21,15 @@ export function RecordStage({
   active,
   ready,
   art,
+  fullBleed,
   onRecorded,
   onStatus,
 }: {
   // The artwork to wear live (the first Character artwork), if any.
   art?: string;
+  // Fill the whole screen behind the page; top/bottom mark the open camera area between the
+  // title and the controls, where the hint and record button go.
+  fullBleed?: { top: number; bottom: number };
   // The stage is on screen; the camera only runs then.
   active: boolean;
   // There's artwork to wear, so recording makes sense.
@@ -103,7 +107,7 @@ export function RecordStage({
   return (
     <View
       ref={stageRef}
-      style={styles.stage}
+      style={fullBleed ? styles.fullBleed : styles.stage}
       onLayout={({ nativeEvent: { layout } }) =>
         setStage({ width: layout.width, height: layout.height })
       }>
@@ -131,7 +135,9 @@ export function RecordStage({
       {art && live && <LiveRig art={art} live={live} stage={stage} mirrored />}
       {art && active && CAN_RECORD && <PoseBridge />}
 
-      <View style={styles.top} pointerEvents="none">
+      <View
+        style={[styles.top, fullBleed && { top: fullBleed.top + Spacing.two }]}
+        pointerEvents="none">
         <ThemedText type="caption" style={styles.hint}>
           {recording
             ? `Recording ${formatTime(elapsed).slice(3)} of 0:${TRACK_MAX_SECONDS}`
@@ -153,6 +159,7 @@ export function RecordStage({
           accessibilityLabel={recording ? 'Stop recording' : 'Record yourself'}
           style={({ pressed }) => [
             styles.shutter,
+            fullBleed && { bottom: fullBleed.bottom + Spacing.three },
             !cameraReady && styles.disabled,
             pressed && styles.pressed,
           ]}>
@@ -170,6 +177,10 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     overflow: 'hidden',
     backgroundColor: '#111111',
+  },
+  fullBleed: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#000000',
   },
   center: {
     ...StyleSheet.absoluteFill,
